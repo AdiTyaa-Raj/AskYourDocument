@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Iterable
+from typing import Any, Iterable, Mapping
 
-from fastapi import FastAPI, Request, status
+from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
 from app.services.jwt_service import InvalidTokenError, decode_access_token
@@ -12,6 +12,26 @@ from app.services.jwt_service import InvalidTokenError, decode_access_token
 
 def _is_public_path(path: str, public_prefixes: Iterable[str]) -> bool:
     return any(path == prefix or path.startswith(prefix) for prefix in public_prefixes)
+
+
+def get_token_payload(request: Request) -> Mapping[str, Any]:
+    payload = getattr(request.state, "token_payload", None)
+    if not isinstance(payload, Mapping):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing token payload",
+        )
+    return payload
+
+
+def require_super_admin(request: Request) -> Mapping[str, Any]:
+    payload = get_token_payload(request)
+    if payload.get("is_super_admin") is not True:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Super admin privileges required",
+        )
+    return payload
 
 
 def apply_auth_middleware(app: FastAPI) -> None:
