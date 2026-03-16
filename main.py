@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.openapi.utils import get_openapi
 
 from app.config import load_env
-from app.config.db import check_db, create_tables, is_db_configured
+from app.config.db import bootstrap_schema, check_db, is_db_configured
 
 from app.api import api_router
 from app.middleware.auth import apply_auth_middleware
@@ -46,7 +46,7 @@ app.openapi = custom_openapi
 @app.on_event("startup")
 def startup_db_bootstrap() -> None:
     if is_db_configured():
-        create_tables()
+        bootstrap_schema()
 
 
 @app.get("/health", tags=["health"])

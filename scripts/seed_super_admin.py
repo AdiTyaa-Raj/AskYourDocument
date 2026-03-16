@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from sqlalchemy.orm import Session
 
 from app.config import load_env
-from app.config.db import create_tables, get_session_factory, is_db_configured
+from app.config.db import bootstrap_schema, get_session_factory, is_db_configured
 from app.models.access_control import Permission, Role, RolePermission, Tenant, User, UserRole
 from app.utils.passwords import hash_password
 
@@ -27,7 +27,7 @@ def main() -> int:
         print("Database is not configured. Set DATABASE_URL or POSTGRES_* env vars.", file=sys.stderr)
         return 1
 
-    create_tables()
+    bootstrap_schema()
     session_factory = get_session_factory()
     with session_factory() as db:
         seed_super_admin(db, email=args.email, password=args.password, name=args.name)
@@ -37,6 +37,22 @@ def main() -> int:
 
 
 def seed_super_admin(db: Session, *, email: str, password: str, name: str) -> None:
+    def ensure_role(*, tenant_id: int, role_name: str, description: str) -> None:
+        role = (
+            db.query(Role)
+            .filter(Role.tenant_id == tenant_id, Role.name == role_name)
+            .one_or_none()
+        )
+        if role is None:
+            db.add(
+                Role(
+                    tenant_id=tenant_id,
+                    name=role_name,
+                    description=description,
+                    is_active=True,
+                )
+            )
+
     tenants = db.query(Tenant).all()
     if not tenants:
         default_tenant = Tenant(
@@ -62,6 +78,18 @@ def seed_super_admin(db: Session, *, email: str, password: str, name: str) -> No
         if tenant.superuser_email != email or tenant.superuser_name != name:
             tenant.superuser_email = email
             tenant.superuser_name = name
+
+        ensure_role(
+            tenant_id=tenant.id,
+            role_name="tenant_admin",
+            description="Tenant admin (seeded)",
+        )
+        ensure_role(
+            tenant_id=tenant.id,
+            role_name="tenant_member",
+            description="Tenant member (seeded)",
+        )
+        db.flush()
 
         role = (
             db.query(Role)

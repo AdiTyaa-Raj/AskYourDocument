@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.config.security import AUTH_PASSWORD, AUTH_USERNAME
 from app.config.db import get_db, is_db_configured
-from app.middleware.auth import require_super_admin
+from app.middleware.auth import get_token_payload, require_super_admin
 from app.models.access_control import Role, Tenant, User, UserRole
 from app.services.jwt_service import create_access_token
 from app.utils.passwords import hash_password, verify_password
@@ -34,7 +34,11 @@ class LoginResponse(BaseModel):
 
 
 @router.post("/login", tags=["auth"], response_model=LoginResponse)
-def login(payload: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse:
+def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)) -> LoginResponse:
+    # Require a valid access token (handled by middleware); this is a guardrail in case
+    # the route is ever made public again.
+    get_token_payload(request)
+
     identifier = payload.identifier.strip()
 
     if is_db_configured():
@@ -75,14 +79,19 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse
                     else (tenant_role_names[0] if tenant_role_names else "user")
                 )
 
+                is_super_admin = bool(super_admin_tenant_ids)
+                extra_claims = {
+                    "email": identifier,
+                    "is_super_admin": is_super_admin,
+                    "tenant_ids": super_admin_tenant_ids,
+                }
+                if not is_super_admin:
+                    extra_claims["tenant_id"] = users[0].tenant_id
+
                 return LoginResponse(
                     access_token=create_access_token(
                         subject=identifier,
-                        extra_claims={
-                            "email": identifier,
-                            "is_super_admin": bool(super_admin_tenant_ids),
-                            "tenant_ids": super_admin_tenant_ids,
-                        },
+                        extra_claims=extra_claims,
                     ),
                     role=role,
                     email=users[0].email,

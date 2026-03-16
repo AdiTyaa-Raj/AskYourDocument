@@ -34,10 +34,30 @@ def require_super_admin(request: Request) -> Mapping[str, Any]:
     return payload
 
 
+def get_current_tenant_id(request: Request) -> int:
+    payload = get_token_payload(request)
+    tenant_id = payload.get("tenant_id")
+    if isinstance(tenant_id, int) and tenant_id > 0:
+        return tenant_id
+
+    tenant_ids = payload.get("tenant_ids")
+    if (
+        isinstance(tenant_ids, list)
+        and len(tenant_ids) == 1
+        and isinstance(tenant_ids[0], int)
+        and tenant_ids[0] > 0
+    ):
+        return tenant_ids[0]
+
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="Tenant context required",
+    )
+
+
 def apply_auth_middleware(app: FastAPI) -> None:
     public_prefixes = (
         "/health",
-        "/api/v1/login",
         "/docs",
         "/redoc",
         "/openapi.json",

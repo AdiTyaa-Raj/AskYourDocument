@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Generator, Optional
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
@@ -77,3 +78,48 @@ def create_tables() -> None:
     import app.models  # noqa: F401
 
     Base.metadata.create_all(bind=get_engine())
+
+
+def bootstrap_schema() -> None:
+    """Ensure the database schema exists.
+
+    Prefers Alembic migrations when available; falls back to SQLAlchemy
+    `create_all()` for lightweight/dev usage.
+    """
+
+    root_dir = Path(__file__).resolve().parents[3]
+    alembic_ini = root_dir / "alembic.ini"
+    if not alembic_ini.exists():
+        create_tables()
+        return
+
+    try:
+        from alembic import command
+        from alembic.config import Config
+    except ImportError:
+        create_tables()
+        return
+
+    cfg = Config(str(alembic_ini))
+    engine = get_engine()
+    inspector = inspect(engine)
+    existing_tables = set(inspector.get_table_names())
+
+    managed_tables = {
+        "tenants",
+        "users",
+        "roles",
+        "permissions",
+        "user_roles",
+        "role_permissions",
+    }
+
+    if "alembic_version" not in existing_tables and (existing_tables & managed_tables):
+        # Backward-compat: earlier versions of the app created tables via create_all().
+        # For an already-bootstrapped database, ensure any missing tables exist and stamp
+        # the current migration head so future upgrades work.
+        create_tables()
+        command.stamp(cfg, "head")
+        return
+
+    command.upgrade(cfg, "head")
