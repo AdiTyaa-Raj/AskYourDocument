@@ -58,6 +58,8 @@ def get_current_tenant_id(request: Request) -> int:
 def apply_auth_middleware(app: FastAPI) -> None:
     public_prefixes = (
         "/health",
+        "/api/v1/ping",
+        "/api/v1/login",
         "/docs",
         "/redoc",
         "/openapi.json",

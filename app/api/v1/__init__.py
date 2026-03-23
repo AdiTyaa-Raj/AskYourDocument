@@ -1,21 +1,30 @@
 from __future__ import annotations
 
+import logging
 import re
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import File, Form, UploadFile
 from pydantic import AliasChoices, BaseModel, ConfigDict, EmailStr, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config.security import AUTH_PASSWORD, AUTH_USERNAME
-from app.config.db import get_db, is_db_configured
+from app.config.db import get_db, get_session_factory, is_db_configured
 from app.middleware.auth import get_token_payload, require_super_admin
 from app.models.access_control import Role, Tenant, User, UserRole
+from app.services.document_text_extraction_service import (
+    extract_and_store_text_pdfplumber,
+    is_pdfplumber_enabled_on_upload,
+)
 from app.services.jwt_service import create_access_token
+from app.services.s3_storage_service import S3NotConfiguredError, S3UploadError, upload_document_to_s3
+from app.services.textract_text_extraction_service import maybe_extract_text_and_log
 from app.utils.passwords import hash_password, verify_password
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 class LoginRequest(BaseModel):
@@ -35,10 +44,6 @@ class LoginResponse(BaseModel):
 
 @router.post("/login", tags=["auth"], response_model=LoginResponse)
 def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)) -> LoginResponse:
-    # Require a valid access token (handled by middleware); this is a guardrail in case
-    # the route is ever made public again.
-    get_token_payload(request)
-
     identifier = payload.identifier.strip()
 
     if is_db_configured():
@@ -119,6 +124,88 @@ def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)
 @router.get("/ping", tags=["health"])
 def ping() -> dict:
     return {"message": "pong"}
+
+
+class UploadDocumentResponse(BaseModel):
+    bucket: str
+    key: str
+    s3_uri: str
+    content_type: Optional[str] = None
+    size_bytes: Optional[int] = None
+
+
+@router.post(
+    "/documents/upload",
+    tags=["documents"],
+    status_code=status.HTTP_201_CREATED,
+    response_model=UploadDocumentResponse,
+)
+def upload_document(
+    request: Request,
+    file: UploadFile = File(...),
+    prefix: Optional[str] = Form(default=None),
+) -> UploadDocumentResponse:
+    payload = get_token_payload(request)
+    tenant_id = payload.get("tenant_id") if isinstance(payload.get("tenant_id"), int) else None
+
+    filename = (file.filename or "").strip()
+    if not filename:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing filename")
+
+    try:
+        result = upload_document_to_s3(
+            file_obj=file.file,
+            filename=filename,
+            content_type=file.content_type,
+            tenant_id=tenant_id,
+            prefix=prefix,
+        )
+    except S3NotConfiguredError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+    except S3UploadError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
+
+    maybe_extract_text_and_log(
+        bucket=result.bucket,
+        key=result.key,
+        s3_uri=result.s3_uri,
+        filename=filename,
+        content_type=file.content_type,
+    )
+
+    if is_db_configured() and is_pdfplumber_enabled_on_upload():
+        try:
+            session_factory = get_session_factory()
+            with session_factory() as db:
+                extract_and_store_text_pdfplumber(
+                    db=db,
+                    tenant_id=tenant_id,
+                    bucket=result.bucket,
+                    key=result.key,
+                    s3_uri=result.s3_uri,
+                    filename=filename,
+                    content_type=file.content_type,
+                    size_bytes=result.size_bytes,
+                )
+        except Exception:
+            logger.exception(
+                "pdfplumber text extraction persistence failed",
+                extra={"s3_uri": result.s3_uri},
+            )
+
+    return UploadDocumentResponse(
+        bucket=result.bucket,
+        key=result.key,
+        s3_uri=result.s3_uri,
+        content_type=result.content_type,
+        size_bytes=result.size_bytes,
+    )
 
 
 class CreateUserRequest(BaseModel):
