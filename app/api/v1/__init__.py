@@ -11,7 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config.security import AUTH_PASSWORD, AUTH_USERNAME
-from app.config.db import get_db, get_session_factory, is_db_configured
+from app.config.db import get_db, is_db_configured
 from app.middleware.auth import get_token_payload, require_super_admin
 from app.models.access_control import Role, Tenant, User, UserRole
 from app.services.document_text_extraction_service import (
@@ -144,6 +144,7 @@ def upload_document(
     request: Request,
     file: UploadFile = File(...),
     prefix: Optional[str] = Form(default=None),
+    db: Session = Depends(get_db),
 ) -> UploadDocumentResponse:
     payload = get_token_payload(request)
     tenant_id = payload.get("tenant_id") if isinstance(payload.get("tenant_id"), int) else None
@@ -171,6 +172,7 @@ def upload_document(
             detail=str(exc),
         ) from exc
 
+    # Run text extraction directly in the request.
     maybe_extract_text_and_log(
         bucket=result.bucket,
         key=result.key,
@@ -179,23 +181,21 @@ def upload_document(
         content_type=file.content_type,
     )
 
-    if is_db_configured() and is_pdfplumber_enabled_on_upload():
+    if is_pdfplumber_enabled_on_upload() and is_db_configured():
         try:
-            session_factory = get_session_factory()
-            with session_factory() as db:
-                extract_and_store_text_pdfplumber(
-                    db=db,
-                    tenant_id=tenant_id,
-                    bucket=result.bucket,
-                    key=result.key,
-                    s3_uri=result.s3_uri,
-                    filename=filename,
-                    content_type=file.content_type,
-                    size_bytes=result.size_bytes,
-                )
+            extract_and_store_text_pdfplumber(
+                db=db,
+                tenant_id=tenant_id,
+                bucket=result.bucket,
+                key=result.key,
+                s3_uri=result.s3_uri,
+                filename=filename,
+                content_type=file.content_type,
+                size_bytes=result.size_bytes,
+            )
         except Exception:
             logger.exception(
-                "pdfplumber text extraction persistence failed",
+                "pdfplumber extraction failed",
                 extra={"s3_uri": result.s3_uri},
             )
 
