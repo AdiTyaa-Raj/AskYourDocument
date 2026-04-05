@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Optional
+from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi import File, Form, UploadFile
@@ -19,6 +19,7 @@ from app.services.document_text_extraction_service import (
     is_pdfplumber_enabled_on_upload,
 )
 from app.services.jwt_service import create_access_token
+from app.services.email_service import BrevoNotConfiguredError, BrevoSendError, send_email
 from app.services.s3_storage_service import S3NotConfiguredError, S3UploadError, upload_document_to_s3
 from app.services.textract_text_extraction_service import maybe_extract_text_and_log
 from app.utils.passwords import hash_password, verify_password
@@ -30,7 +31,7 @@ logger = logging.getLogger(__name__)
 class LoginRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
-    identifier: str = Field(min_length=1, validation_alias=AliasChoices("email", "username"))
+    identifier: Annotated[str, Field(min_length=1, validation_alias=AliasChoices("email", "username"))]
     password: str = Field(min_length=1)
 
 
@@ -298,6 +299,52 @@ def create_user(
         full_name=user.full_name,
         is_active=user.is_active,
     )
+
+
+class SendEmailRequest(BaseModel):
+    to_email: EmailStr
+    to_name: str = Field(min_length=1, max_length=255)
+    subject: str = Field(min_length=1, max_length=998)
+    html_content: str = Field(min_length=1)
+    text_content: Optional[str] = None
+
+
+class SendEmailResponse(BaseModel):
+    message_id: str
+
+
+@router.post(
+    "/email/send",
+    tags=["email"],
+    status_code=status.HTTP_200_OK,
+    response_model=SendEmailResponse,
+)
+def send_email_endpoint(
+    payload: SendEmailRequest,
+    request: Request,
+) -> SendEmailResponse:
+    get_token_payload(request)  # requires valid JWT
+
+    try:
+        message_id = send_email(
+            to_email=str(payload.to_email),
+            to_name=payload.to_name,
+            subject=payload.subject,
+            html_content=payload.html_content,
+            text_content=payload.text_content,
+        )
+    except BrevoNotConfiguredError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+    except BrevoSendError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
+
+    return SendEmailResponse(message_id=message_id)
 
 
 class CreateTenantRequest(BaseModel):
