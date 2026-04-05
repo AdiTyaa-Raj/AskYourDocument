@@ -260,10 +260,11 @@ def list_documents(
     query = db.query(DocumentTextExtraction)
 
     if not is_super_admin:
-        tenant_id = payload.get("tenant_id")
-        if not isinstance(tenant_id, int):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Tenant context required")
-        query = query.filter(DocumentTextExtraction.tenant_id == tenant_id)
+        email = payload.get("sub") or payload.get("email")
+        user = db.query(User).filter(User.email == email, User.is_active.is_(True)).first()
+        if not user or not user.tenant_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User tenant not found")
+        query = query.filter(DocumentTextExtraction.tenant_id == user.tenant_id)
 
     total = query.count()
     documents = (
@@ -278,6 +279,59 @@ def list_documents(
         skip=skip,
         limit=limit,
         documents=[DocumentSummary.model_validate(doc) for doc in documents],
+    )
+
+
+class CurrentUserResponse(BaseModel):
+    id: int
+    email: EmailStr
+    full_name: str
+    is_active: bool
+    tenant_id: Optional[int]
+    tenant_name: Optional[str]
+    role: str
+
+
+@router.get("/users/me", tags=["users"], response_model=CurrentUserResponse)
+def get_current_user(request: Request, db: Session = Depends(get_db)) -> CurrentUserResponse:
+    payload = get_token_payload(request)
+    email = payload.get("sub") or payload.get("email")
+
+    if not is_db_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database not configured",
+        )
+
+    user = db.query(User).filter(User.email == email, User.is_active.is_(True)).first()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    is_super_admin = payload.get("is_super_admin", False)
+    if is_super_admin:
+        role = "super_admin"
+    else:
+        role_name = (
+            db.query(Role.name)
+            .join(UserRole, UserRole.role_id == Role.id)
+            .filter(UserRole.user_id == user.id)
+            .scalar()
+        )
+        role = role_name or "user"
+
+    tenant_name: Optional[str] = None
+    if user.tenant_id:
+        tenant = db.query(Tenant).filter(Tenant.id == user.tenant_id).first()
+        tenant_name = tenant.name if tenant else None
+
+    return CurrentUserResponse(
+        id=user.id,
+        email=user.email,
+        full_name=user.full_name,
+        is_active=user.is_active,
+        tenant_id=user.tenant_id,
+        tenant_name=tenant_name,
+        role=role,
     )
 
 

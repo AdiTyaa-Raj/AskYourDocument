@@ -62,9 +62,17 @@ def seed_super_admin(db: Session, *, email: str, password: str, name: str) -> No
             superuser_email=email,
             is_active=True,
         )
+        demo_tenant = Tenant(
+            name="Demo Tenant",
+            slug="demo",
+            superuser_name=name,
+            superuser_email=email,
+            is_active=True,
+        )
         db.add(default_tenant)
+        db.add(demo_tenant)
         db.flush()
-        tenants = [default_tenant]
+        tenants = [default_tenant, demo_tenant]
 
     permission = (
         db.query(Permission).filter(Permission.resource == "*", Permission.action == "*").one_or_none()
@@ -88,6 +96,21 @@ def seed_super_admin(db: Session, *, email: str, password: str, name: str) -> No
             tenant_id=tenant.id,
             role_name="tenant_member",
             description="Tenant member (seeded)",
+        )
+        ensure_role(
+            tenant_id=tenant.id,
+            role_name="editor",
+            description="Can upload and manage documents (seeded)",
+        )
+        ensure_role(
+            tenant_id=tenant.id,
+            role_name="viewer",
+            description="Read-only access to documents (seeded)",
+        )
+        ensure_role(
+            tenant_id=tenant.id,
+            role_name="billing_admin",
+            description="Manages billing and subscription settings (seeded)",
         )
         db.flush()
 
@@ -139,6 +162,39 @@ def seed_super_admin(db: Session, *, email: str, password: str, name: str) -> No
         )
         if user_role is None:
             db.add(UserRole(user_id=user.id, role_id=role.id))
+
+        # Seed demo user only for the demo tenant
+        if tenant.slug == "demo":
+            demo_email = "demo@demo.com"
+            demo_user = (
+                db.query(User)
+                .filter(User.tenant_id == tenant.id, User.email == demo_email)
+                .one_or_none()
+            )
+            if demo_user is None:
+                demo_user = User(
+                    tenant_id=tenant.id,
+                    email=demo_email,
+                    full_name="Demo User",
+                    password_hash=hash_password("Admin@123"),
+                    is_active=True,
+                )
+                db.add(demo_user)
+                db.flush()
+
+            demo_role = (
+                db.query(Role)
+                .filter(Role.tenant_id == tenant.id, Role.name == "tenant_member")
+                .one_or_none()
+            )
+            if demo_role is not None:
+                demo_user_role = (
+                    db.query(UserRole)
+                    .filter(UserRole.user_id == demo_user.id, UserRole.role_id == demo_role.id)
+                    .one_or_none()
+                )
+                if demo_user_role is None:
+                    db.add(UserRole(user_id=demo_user.id, role_id=demo_role.id))
 
 
 if __name__ == "__main__":
