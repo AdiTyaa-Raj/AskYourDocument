@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, String, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.config.db import Base
@@ -37,6 +37,10 @@ class DocumentTextExtraction(Base):
     error_message: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
     extracted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    extraction_completed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    chunking_completed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    embedding_completed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -45,4 +49,5 @@ class DocumentTextExtraction(Base):
     )
 
     tenant = relationship("Tenant")
+    chunks = relationship("DocumentChunk", back_populates="document_text_extraction", cascade="all, delete-orphan")
 

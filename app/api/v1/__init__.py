@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Annotated, Optional
+from datetime import datetime
+from typing import Annotated, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi import File, Form, UploadFile
@@ -14,6 +15,8 @@ from app.config.security import AUTH_PASSWORD, AUTH_USERNAME
 from app.config.db import get_db, is_db_configured
 from app.middleware.auth import get_token_payload, require_super_admin
 from app.models.access_control import Role, Tenant, User, UserRole
+from app.models.document_text_extraction import DocumentTextExtraction
+from app.services.document_chunking_service import chunk_and_store
 from app.services.document_text_extraction_service import (
     extract_and_store_text_pdfplumber,
     is_pdfplumber_enabled_on_upload,
@@ -184,7 +187,7 @@ def upload_document(
 
     if is_pdfplumber_enabled_on_upload() and is_db_configured():
         try:
-            extract_and_store_text_pdfplumber(
+            extraction = extract_and_store_text_pdfplumber(
                 db=db,
                 tenant_id=tenant_id,
                 bucket=result.bucket,
@@ -194,9 +197,10 @@ def upload_document(
                 content_type=file.content_type,
                 size_bytes=result.size_bytes,
             )
+            chunk_and_store(db=db, extraction=extraction)
         except Exception:
             logger.exception(
-                "pdfplumber extraction failed",
+                "pdfplumber extraction or chunking failed",
                 extra={"s3_uri": result.s3_uri},
             )
 
@@ -206,6 +210,74 @@ def upload_document(
         s3_uri=result.s3_uri,
         content_type=result.content_type,
         size_bytes=result.size_bytes,
+    )
+
+
+class DocumentSummary(BaseModel):
+    id: int
+    filename: Optional[str]
+    content_type: Optional[str]
+    size_bytes: Optional[int]
+    s3_uri: str
+    status: str
+    extraction_method: str
+    extracted_char_count: int
+    error_message: Optional[str]
+    extraction_completed: bool
+    chunking_completed: bool
+    embedding_completed: bool
+    tenant_id: Optional[int]
+    extracted_at: Optional[datetime]
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class DocumentListResponse(BaseModel):
+    total: int
+    skip: int
+    limit: int
+    documents: List[DocumentSummary]
+
+
+@router.get("/documents", tags=["documents"], response_model=DocumentListResponse)
+def list_documents(
+    request: Request,
+    skip: int = 0,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+) -> DocumentListResponse:
+    if not is_db_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database not configured",
+        )
+
+    payload = get_token_payload(request)
+    is_super_admin = payload.get("is_super_admin", False)
+
+    query = db.query(DocumentTextExtraction)
+
+    if not is_super_admin:
+        tenant_id = payload.get("tenant_id")
+        if not isinstance(tenant_id, int):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Tenant context required")
+        query = query.filter(DocumentTextExtraction.tenant_id == tenant_id)
+
+    total = query.count()
+    documents = (
+        query.order_by(DocumentTextExtraction.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+
+    return DocumentListResponse(
+        total=total,
+        skip=skip,
+        limit=limit,
+        documents=[DocumentSummary.model_validate(doc) for doc in documents],
     )
 
 
