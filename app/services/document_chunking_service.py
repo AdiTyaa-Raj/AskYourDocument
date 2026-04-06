@@ -82,6 +82,8 @@ def chunk_and_store(
         )
 
     db.add_all(records)
+
+    extraction.chunking_completed = True
     db.commit()
 
     logger.info(

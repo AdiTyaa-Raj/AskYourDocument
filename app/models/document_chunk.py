@@ -19,8 +19,11 @@ DEFAULT_CHUNK_SIZE_TOKENS = 500
 DEFAULT_CHUNK_OVERLAP_TOKENS = 50
 DEFAULT_MIN_CHUNK_TOKENS = 100
 
-# text-embedding-005 model identifier
+# text-embedding-005 model identifier (Google — legacy)
 EMBEDDING_MODEL_TEXT_EMBEDDING_005 = "text-embedding-005"
+
+# Google embedding model (gemini-embedding-001 → 768 dims with output_dimensionality, matches EMBEDDING_DIM)
+EMBEDDING_MODEL_GOOGLE = "gemini-embedding-001"
 
 
 class DocumentChunk(Base):
@@ -67,7 +70,7 @@ class DocumentChunk(Base):
         Integer, nullable=False, server_default=str(DEFAULT_CHUNK_OVERLAP_TOKENS)
     )
 
-    # Embedding vector (text-embedding-005 → 768 dims)
+    # Embedding vector (gemini-embedding-001 → 768 dims)
     embedding: Mapped[Optional[list]] = mapped_column(Vector(EMBEDDING_DIM), nullable=True)
     embedding_model: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     embedded_at: Mapped[Optional[datetime]] = mapped_column(

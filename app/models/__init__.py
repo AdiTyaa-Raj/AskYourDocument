@@ -2,6 +2,7 @@
 
 from app.models.access_control import Permission, Role, RolePermission, Tenant, User, UserRole
 from app.models.document_chunk import DocumentChunk
+from app.models.document_job import DocumentJob
 from app.models.document_text_extraction import DocumentTextExtraction
 
 __all__ = [
@@ -13,4 +14,5 @@ __all__ = [
     "RolePermission",
     "DocumentTextExtraction",
     "DocumentChunk",
+    "DocumentJob",
 ]

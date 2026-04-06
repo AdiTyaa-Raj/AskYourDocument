@@ -1,3 +1,6 @@
+import logging
+import os
+
 from fastapi import FastAPI
 from fastapi.openapi.utils import get_openapi
 
@@ -8,6 +11,22 @@ from app.api import api_router
 from app.middleware.auth import apply_auth_middleware
 
 load_env()
+
+# ---------------------------------------------------------------------------
+# Logging – configure once at process start so every logger in the app
+# (upload endpoint, job worker, services, …) writes to stdout.
+# Set LOG_LEVEL env var to DEBUG / WARNING etc. to override.
+# ---------------------------------------------------------------------------
+_LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=_LOG_LEVEL,
+    format="%(asctime)s  %(levelname)-8s  [%(name)s]  %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+# Keep uvicorn's own loggers in sync so their output uses the same format.
+for _uvicorn_logger in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+    logging.getLogger(_uvicorn_logger).handlers = []
+    logging.getLogger(_uvicorn_logger).propagate = True
 app = FastAPI(
     title="AskYourDocument",
     swagger_ui_parameters={"persistAuthorization": True},
@@ -47,6 +66,8 @@ app.openapi = custom_openapi
 def startup_db_bootstrap() -> None:
     if is_db_configured():
         bootstrap_schema()
+        from app.services.document_job_worker import start_worker
+        start_worker()
 
 
 @app.get("/health", tags=["health"])

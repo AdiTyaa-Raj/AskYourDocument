@@ -15,16 +15,11 @@ from app.config.security import AUTH_PASSWORD, AUTH_USERNAME
 from app.config.db import get_db, is_db_configured
 from app.middleware.auth import get_token_payload, require_super_admin
 from app.models.access_control import Role, Tenant, User, UserRole
+from app.models.document_job import DocumentJob, JOB_STATUS_PENDING, JOB_TYPE_TEXT_EXTRACTION
 from app.models.document_text_extraction import DocumentTextExtraction
-from app.services.document_chunking_service import chunk_and_store
-from app.services.document_text_extraction_service import (
-    extract_and_store_text_pdfplumber,
-    is_pdfplumber_enabled_on_upload,
-)
 from app.services.jwt_service import create_access_token
 from app.services.email_service import BrevoNotConfiguredError, BrevoSendError, send_email
 from app.services.s3_storage_service import S3NotConfiguredError, S3UploadError, upload_document_to_s3
-from app.services.textract_text_extraction_service import maybe_extract_text_and_log
 from app.utils.passwords import hash_password, verify_password
 
 router = APIRouter()
@@ -151,11 +146,32 @@ def upload_document(
     db: Session = Depends(get_db),
 ) -> UploadDocumentResponse:
     payload = get_token_payload(request)
-    tenant_id = payload.get("tenant_id") if isinstance(payload.get("tenant_id"), int) else None
+    is_super_admin = payload.get("is_super_admin", False)
+
+    if is_super_admin:
+        # Super admins are not scoped to any tenant; tenant_id stays None.
+        tenant_id: Optional[int] = None
+    else:
+        # Fetch tenant_id from the user record in DB (authoritative source).
+        email = payload.get("sub") or payload.get("email")
+        user = db.query(User).filter(User.email == email, User.is_active.is_(True)).first()
+        if not user:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User not found")
+        tenant_id = user.tenant_id
 
     filename = (file.filename or "").strip()
     if not filename:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing filename")
+
+    logger.info(
+        "──────────────────────────────────────────────────────────────",
+    )
+    logger.info(
+        "[UPLOAD] Received  file=%s  content_type=%s  tenant_id=%s",
+        filename,
+        file.content_type or "unknown",
+        tenant_id,
+    )
 
     try:
         result = upload_document_to_s3(
@@ -166,43 +182,52 @@ def upload_document(
             prefix=prefix,
         )
     except S3NotConfiguredError as exc:
+        logger.error("[UPLOAD] FAILED (S3 not configured) | file=%s | %s", filename, exc)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=str(exc),
         ) from exc
     except S3UploadError as exc:
+        logger.error("[UPLOAD] FAILED (S3 error) | file=%s | %s", filename, exc)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=str(exc),
         ) from exc
 
-    # Run text extraction directly in the request.
-    maybe_extract_text_and_log(
-        bucket=result.bucket,
-        key=result.key,
-        s3_uri=result.s3_uri,
-        filename=filename,
-        content_type=file.content_type,
+    logger.info(
+        "[UPLOAD] S3 OK     file=%s  size=%s bytes  s3_uri=%s",
+        filename,
+        f"{result.size_bytes:,}" if result.size_bytes else "unknown",
+        result.s3_uri,
     )
 
-    if is_pdfplumber_enabled_on_upload() and is_db_configured():
-        try:
-            extraction = extract_and_store_text_pdfplumber(
-                db=db,
-                tenant_id=tenant_id,
-                bucket=result.bucket,
-                key=result.key,
-                s3_uri=result.s3_uri,
-                filename=filename,
-                content_type=file.content_type,
-                size_bytes=result.size_bytes,
-            )
-            chunk_and_store(db=db, extraction=extraction)
-        except Exception:
-            logger.exception(
-                "pdfplumber extraction or chunking failed",
-                extra={"s3_uri": result.s3_uri},
-            )
+    # Queue async pipeline: text_extraction → chunking → embedding.
+    if is_db_configured():
+        job = DocumentJob(
+            tenant_id=tenant_id,
+            job_type=JOB_TYPE_TEXT_EXTRACTION,
+            status=JOB_STATUS_PENDING,
+            bucket=result.bucket,
+            key=result.key,
+            s3_uri=result.s3_uri,
+            filename=filename,
+            content_type=file.content_type,
+            size_bytes=result.size_bytes,
+        )
+        db.add(job)
+        db.commit()
+        db.refresh(job)
+        logger.info(
+            "[UPLOAD] Job queued  job_id=%s  type=TEXT-EXTRACTION  file=%s → returning 201",
+            job.id,
+            filename,
+        )
+    else:
+        logger.warning("[UPLOAD] DB not configured – pipeline job NOT queued for file=%s", filename)
+
+    logger.info(
+        "──────────────────────────────────────────────────────────────",
+    )
 
     return UploadDocumentResponse(
         bucket=result.bucket,

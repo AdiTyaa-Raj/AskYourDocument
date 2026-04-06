@@ -99,6 +99,9 @@ def extract_and_store_text_pdfplumber(
     if existing is None:
         db.add(record)
         db.flush()
+    elif tenant_id_value is not None and record.tenant_id is None:
+        # Backfill tenant_id on existing records that were stored without one.
+        record.tenant_id = tenant_id_value
 
     now = datetime.now(timezone.utc)
     try:
@@ -113,6 +116,7 @@ def extract_and_store_text_pdfplumber(
         record.extracted_char_count = int(len(extracted_text or ""))
         record.error_message = None
         record.extracted_at = now
+        record.extraction_completed = True
     except PdfplumberNotSupportedError as exc:
         record.status = "SKIPPED"
         record.extracted_text = None
