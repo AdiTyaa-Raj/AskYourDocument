@@ -9,6 +9,7 @@ from app.config.db import bootstrap_schema, check_db, is_db_configured
 
 from app.api import api_router
 from app.middleware.auth import apply_auth_middleware
+from app.middleware.cors import apply_cors_middleware
 
 load_env()
 
@@ -32,6 +33,7 @@ app = FastAPI(
     swagger_ui_parameters={"persistAuthorization": True},
 )
 apply_auth_middleware(app)
+apply_cors_middleware(app)
 app.include_router(api_router)
 
 
