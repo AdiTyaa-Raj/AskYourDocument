@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 
 from app.config.db import get_db, is_db_configured
-from app.middleware.auth import get_token_payload
+from app.middleware.auth import get_current_tenant_id, get_token_payload
 from app.models.access_control import User
 from app.models.document_job import DocumentJob, JOB_STATUS_PENDING, JOB_TYPE_TEXT_EXTRACTION
 from app.models.document_text_extraction import DocumentTextExtraction
@@ -179,11 +179,22 @@ def list_documents(
     query = db.query(DocumentTextExtraction)
 
     if not is_super_admin:
-        email = payload.get("sub") or payload.get("email")
-        user = db.query(User).filter(User.email == email, User.is_active.is_(True)).first()
-        if not user or not user.tenant_id:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User tenant not found")
-        query = query.filter(DocumentTextExtraction.tenant_id == user.tenant_id)
+        tenant_id: Optional[int] = None
+        try:
+            tenant_id = get_current_tenant_id(request)
+        except HTTPException:
+            # Backward-compatible fallback for older tokens without tenant context:
+            # derive tenant_id from the DB user record.
+            email = payload.get("sub") or payload.get("email")
+            user = db.query(User).filter(User.email == email, User.is_active.is_(True)).first()
+            if not user or not user.tenant_id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="User tenant not found",
+                )
+            tenant_id = user.tenant_id
+
+        query = query.filter(DocumentTextExtraction.tenant_id == tenant_id)
 
     total = query.count()
     documents = (
