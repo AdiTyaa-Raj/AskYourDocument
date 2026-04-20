@@ -36,6 +36,19 @@ class LoginResponse(BaseModel):
 def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)) -> LoginResponse:
     identifier = payload.identifier.strip()
 
+    # Fast path: allow the dev env-based credentials without touching the DB.
+    # This prevents slow/failed DB connections from breaking basic login flows.
+    if identifier == AUTH_USERNAME and payload.password == AUTH_PASSWORD:
+        return LoginResponse(
+            access_token=create_access_token(
+                subject=identifier,
+                extra_claims={"email": identifier, "is_super_admin": True, "tenant_ids": []},
+            ),
+            role="super_admin",
+            email=identifier,
+            name=identifier,
+        )
+
     if is_db_configured():
         try:
             users = db.query(User).filter(User.email == identifier, User.is_active.is_(True)).all()
@@ -98,14 +111,4 @@ def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)
             # If the DB is down / not migrated yet, fall back to env-based auth.
             pass
 
-    if identifier != AUTH_USERNAME or payload.password != AUTH_PASSWORD:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
-    return LoginResponse(
-        access_token=create_access_token(
-            subject=identifier,
-            extra_claims={"email": identifier, "is_super_admin": True, "tenant_ids": []},
-        ),
-        role="super_admin",
-        email=identifier,
-        name=identifier,
-    )
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")

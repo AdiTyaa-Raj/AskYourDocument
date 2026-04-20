@@ -37,7 +37,7 @@ def embed_query(query_text: str) -> List[float]:
 def search_similar_chunks(
     db: Session,
     query_embedding: List[float],
-    tenant_id: int,
+    tenant_id: Optional[int],
     top_k: int = 5,
     similarity_threshold: float = 0.3,
 ) -> List[dict]:
@@ -45,36 +45,61 @@ def search_similar_chunks(
     Find the top-k most similar document chunks for a given tenant.
 
     Uses pgvector cosine distance operator (<=>).
-    Only returns chunks belonging to the specified tenant_id.
+    When tenant_id is None, only returns chunks with a NULL tenant_id ("global" documents).
     """
     embedding_str = "[" + ",".join(str(v) for v in query_embedding) + "]"
 
-    sql = text("""
-        SELECT
-            dc.id,
-            dc.chunk_text,
-            dc.chunk_index,
-            dc.document_text_extraction_id,
-            dte.filename,
-            1 - (dc.embedding <=> :embedding ::vector) AS similarity
-        FROM document_chunks dc
-        JOIN document_text_extractions dte
-            ON dte.id = dc.document_text_extraction_id
-        WHERE dc.tenant_id = :tenant_id
-          AND dc.embedding IS NOT NULL
-          AND 1 - (dc.embedding <=> :embedding ::vector) >= :threshold
-        ORDER BY dc.embedding <=> :embedding ::vector
-        LIMIT :top_k
-    """)
-
-    rows = db.execute(
-        sql,
-        {
+    if tenant_id is None:
+        sql = text("""
+            SELECT
+                dc.id,
+                dc.chunk_text,
+                dc.chunk_index,
+                dc.document_text_extraction_id,
+                dte.filename,
+                1 - (dc.embedding <=> :embedding ::vector) AS similarity
+            FROM document_chunks dc
+            JOIN document_text_extractions dte
+                ON dte.id = dc.document_text_extraction_id
+            WHERE dc.tenant_id IS NULL
+              AND dc.embedding IS NOT NULL
+              AND 1 - (dc.embedding <=> :embedding ::vector) >= :threshold
+            ORDER BY dc.embedding <=> :embedding ::vector
+            LIMIT :top_k
+        """)
+        params = {
+            "embedding": embedding_str,
+            "threshold": similarity_threshold,
+            "top_k": top_k,
+        }
+    else:
+        sql = text("""
+            SELECT
+                dc.id,
+                dc.chunk_text,
+                dc.chunk_index,
+                dc.document_text_extraction_id,
+                dte.filename,
+                1 - (dc.embedding <=> :embedding ::vector) AS similarity
+            FROM document_chunks dc
+            JOIN document_text_extractions dte
+                ON dte.id = dc.document_text_extraction_id
+            WHERE dc.tenant_id = :tenant_id
+              AND dc.embedding IS NOT NULL
+              AND 1 - (dc.embedding <=> :embedding ::vector) >= :threshold
+            ORDER BY dc.embedding <=> :embedding ::vector
+            LIMIT :top_k
+        """)
+        params = {
             "embedding": embedding_str,
             "tenant_id": tenant_id,
             "threshold": similarity_threshold,
             "top_k": top_k,
-        },
+        }
+
+    rows = db.execute(
+        sql,
+        params,
     ).fetchall()
 
     return [

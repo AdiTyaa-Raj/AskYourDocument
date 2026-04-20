@@ -8,7 +8,7 @@ Here you can upload your document and ask any question related to that document
 
 ## Auth (JWT)
 
-- `POST /api/v1/login` is protected and requires `Authorization: Bearer <access_token>`.
+- `POST /api/v1/login` is public and returns an `access_token` on success.
 - `POST /api/v1/login` with JSON: `{"email":"adi7yaraj@gmail.com","password":"Admin@123"}` (or `{"username": "...", "password": "..."}`) returns a new `access_token` (expires in 1 day).
 - Send the token on all `/api/v1/*` endpoints via header: `Authorization: Bearer <access_token>`.
 

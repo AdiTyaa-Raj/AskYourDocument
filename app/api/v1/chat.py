@@ -46,7 +46,13 @@ def ask_documents(
     body: ChatRequest,
     db: Session = Depends(get_db),
 ) -> ChatResponse:
-    """Ask a question and get an answer grounded in your tenant's documents."""
+    """Ask a question and get an answer grounded in your documents.
+
+    Non-super-admin users are always scoped to their tenant (from the DB user record).
+    Super admins can either:
+      - Provide a tenant context (body.tenant_id or X-Tenant-ID) to scope to that tenant, or
+      - Omit tenant context to search only "global" (NULL-tenant) documents.
+    """
     if not is_db_configured():
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -70,37 +76,40 @@ def ask_documents(
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail="Invalid X-Tenant-ID header; expected an integer tenant id",
                     ) from exc
-
+        # If a tenant context isn't provided, fall back to token-provided tenant context
+        # when unambiguous (tenant_id claim or a single tenant_ids entry). Otherwise,
+        # keep tenant_id as None to search only global (NULL-tenant) documents.
         if tenant_id is None:
             try:
                 tenant_id = get_current_tenant_id(request)
             except HTTPException as exc:
-                if exc.status_code == status.HTTP_400_BAD_REQUEST:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail="Super admins must specify a tenant context to use chat. "
-                        "Chat is scoped to a single tenant's documents.",
-                    ) from exc
-                raise
+                if exc.status_code != status.HTTP_400_BAD_REQUEST:
+                    raise
 
         tenant_ids = payload.get("tenant_ids")
-        if isinstance(tenant_ids, list) and tenant_ids and tenant_id not in tenant_ids:
+        if (
+            tenant_id is not None
+            and isinstance(tenant_ids, list)
+            and tenant_ids
+            and tenant_id not in tenant_ids
+        ):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Tenant not authorized",
             )
 
     if is_super_admin:
-        tenant = (
-            db.query(Tenant)
-            .filter(Tenant.id == tenant_id, Tenant.is_active.is_(True))
-            .first()
-        )
-        if not tenant:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Tenant not found",
+        if tenant_id is not None:
+            tenant = (
+                db.query(Tenant)
+                .filter(Tenant.id == tenant_id, Tenant.is_active.is_(True))
+                .first()
             )
+            if not tenant:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Tenant not found",
+                )
     else:
         email = payload.get("sub") or payload.get("email")
         user = db.query(User).filter(User.email == email, User.is_active.is_(True)).first()

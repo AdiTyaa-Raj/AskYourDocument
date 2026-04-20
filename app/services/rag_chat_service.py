@@ -1,4 +1,7 @@
-"""RAG chat service – embed user query, retrieve tenant-scoped chunks, generate LLM answer."""
+"""RAG chat service – embed user query, retrieve tenant-scoped chunks, generate LLM answer.
+
+Super-admin flows may pass tenant_id=None to scope retrieval to "global" (NULL-tenant) documents.
+"""
 
 from __future__ import annotations
 
@@ -45,7 +48,7 @@ Rules:
 
 def chat(
     db: Session,
-    tenant_id: int,
+    tenant_id: Optional[int],
     user_query: str,
     top_k: int = 5,
     similarity_threshold: float = 0.3,
@@ -62,7 +65,7 @@ def chat(
     logger.info("[RAG] Embedding query for tenant_id=%s: %s", tenant_id, user_query[:100])
     query_embedding = embed_query(user_query)
 
-    # 2. Retrieve similar chunks (tenant-scoped)
+    # 2. Retrieve similar chunks (tenant-scoped; tenant_id=None searches global documents)
     chunks = search_similar_chunks(
         db=db,
         query_embedding=query_embedding,

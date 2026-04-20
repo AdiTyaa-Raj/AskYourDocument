@@ -67,9 +67,21 @@ app.openapi = custom_openapi
 @app.on_event("startup")
 def startup_db_bootstrap() -> None:
     if is_db_configured():
-        bootstrap_schema()
-        from app.services.document_job_worker import start_worker
-        start_worker()
+        logger = logging.getLogger(__name__)
+        try:
+            # Startup should not hard-crash the API when the DB is temporarily down.
+            # The app can still serve health endpoints and env-based login in that state.
+            bootstrap_schema()
+        except Exception:
+            logger.exception("Database bootstrap failed; continuing without DB")
+            return
+
+        try:
+            from app.services.document_job_worker import start_worker
+
+            start_worker()
+        except Exception:
+            logger.exception("Document job worker failed to start; continuing without worker")
 
 
 @app.get("/health", tags=["health"])
