@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from urllib.parse import quote
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 
@@ -14,6 +16,11 @@ from app.models.access_control import User
 from app.models.document_job import DocumentJob, JOB_STATUS_PENDING, JOB_TYPE_TEXT_EXTRACTION
 from app.models.document_text_extraction import DocumentTextExtraction
 from app.services.s3_storage_service import S3NotConfiguredError, S3UploadError, upload_document_to_s3
+from app.services.s3_storage_service import (
+    S3DownloadError,
+    S3ObjectNotFoundError,
+    iter_s3_object_bytes,
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -158,6 +165,76 @@ def upload_document(
         content_type=result.content_type,
         size_bytes=result.size_bytes,
     )
+
+
+def _content_disposition_filename(filename: str) -> str:
+    # RFC 6266/5987: include both filename and filename* for best browser compatibility.
+    safe_ascii = filename.replace('"', "").replace("\\", "").strip() or "document"
+    return f'attachment; filename="{safe_ascii}"; filename*=UTF-8\'\'{quote(filename)}'
+
+
+@router.get("/documents/{document_id}/download", tags=["documents"])
+def download_document(
+    request: Request,
+    document_id: int,
+    db: Session = Depends(get_db),
+):
+    if not is_db_configured():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database not configured",
+        )
+
+    payload = get_token_payload(request)
+    is_super_admin = payload.get("is_super_admin", False)
+
+    query = db.query(DocumentTextExtraction).filter(DocumentTextExtraction.id == document_id)
+
+    if not is_super_admin:
+        tenant_id: Optional[int] = None
+        try:
+            tenant_id = get_current_tenant_id(request)
+        except HTTPException:
+            # Backward-compatible fallback for older tokens without tenant context:
+            # derive tenant_id from the DB user record.
+            email = payload.get("sub") or payload.get("email")
+            user = db.query(User).filter(User.email == email, User.is_active.is_(True)).first()
+            if not user or not user.tenant_id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="User tenant not found",
+                )
+            tenant_id = user.tenant_id
+
+        query = query.filter(DocumentTextExtraction.tenant_id == tenant_id)
+
+    doc = query.first()
+    if not doc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+    filename = (doc.filename or "").strip() or f"document-{doc.id}"
+    media_type = doc.content_type or "application/octet-stream"
+
+    try:
+        byte_iter = iter_s3_object_bytes(bucket=doc.bucket, key=doc.key)
+    except S3NotConfiguredError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+    except S3ObjectNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except S3DownloadError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
+
+    headers = {"Content-Disposition": _content_disposition_filename(filename)}
+    return StreamingResponse(byte_iter, media_type=media_type, headers=headers)
 
 
 @router.get("/documents", tags=["documents"], response_model=DocumentListResponse)

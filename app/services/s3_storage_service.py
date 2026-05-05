@@ -30,6 +30,10 @@ class S3DownloadError(RuntimeError):
     pass
 
 
+class S3ObjectNotFoundError(S3DownloadError):
+    pass
+
+
 @dataclass(frozen=True)
 class S3UploadResult:
     bucket: str
@@ -152,6 +156,49 @@ def download_s3_object_to_fileobj(*, bucket: str, key: str, file_obj) -> None:
         client.download_fileobj(Bucket=bucket, Key=key, Fileobj=file_obj)
     except (BotoCoreError, ClientError) as exc:
         raise S3DownloadError("Failed to download file from S3") from exc
+
+
+def iter_s3_object_bytes(
+    *,
+    bucket: str,
+    key: str,
+    chunk_size: int = 1024 * 1024,
+) -> Iterator[bytes]:
+    cfg = get_s3_config()
+    if cfg is None:
+        raise S3NotConfiguredError(
+            "Missing S3 configuration; set S3_BUCKET_NAME and AWS credentials in environment."
+        )
+
+    try:
+        client = _get_s3_client(cfg)
+        response = client.get_object(Bucket=bucket, Key=key)
+    except (BotoCoreError, ClientError) as exc:
+        error_code = None
+        try:
+            error_code = exc.response.get("Error", {}).get("Code")
+        except Exception:
+            error_code = None
+        if error_code in ("NoSuchKey", "404", "NotFound"):
+            raise S3ObjectNotFoundError("S3 object not found") from exc
+        raise S3DownloadError("Failed to download file from S3") from exc
+
+    body = response.get("Body")
+    if body is None:
+        raise S3DownloadError("Failed to download file from S3")
+
+    def _iter() -> Iterator[bytes]:
+        try:
+            for chunk in body.iter_chunks(chunk_size=chunk_size):
+                if chunk:
+                    yield chunk
+        finally:
+            try:
+                body.close()
+            except Exception:
+                pass
+
+    return _iter()
 
 
 def iter_s3_keys(*, bucket: str, prefix: str | None = None) -> Iterator[str]:

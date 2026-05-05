@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.config.db import get_db, is_db_configured
 from app.middleware.auth import get_current_tenant_id, get_token_payload
 from app.models.access_control import Tenant, User
+from app.models.document_text_extraction import DocumentTextExtraction
 from app.services.rag_chat_service import chat as rag_chat
 
 router = APIRouter()
@@ -31,6 +32,9 @@ class ChatRequest(BaseModel):
 class SourceInfo(BaseModel):
     document_id: int
     filename: Optional[str] = None
+    content_type: Optional[str] = None
+    size_bytes: Optional[int] = None
+    download_url: Optional[str] = None
     similarity: float
 
 
@@ -133,5 +137,35 @@ def ask_documents(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=str(exc),
         ) from exc
+
+    sources = result.get("sources") or []
+    if sources:
+        doc_ids = [s.get("document_id") for s in sources if isinstance(s, dict)]
+        doc_ids = [doc_id for doc_id in doc_ids if isinstance(doc_id, int)]
+
+        docs_by_id: Dict[int, DocumentTextExtraction] = {}
+        if doc_ids:
+            query = db.query(DocumentTextExtraction).filter(DocumentTextExtraction.id.in_(doc_ids))
+            if tenant_id is None:
+                query = query.filter(DocumentTextExtraction.tenant_id.is_(None))
+            else:
+                query = query.filter(DocumentTextExtraction.tenant_id == tenant_id)
+            docs_by_id = {doc.id: doc for doc in query.all()}
+
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            doc_id = source.get("document_id")
+            if not isinstance(doc_id, int):
+                continue
+            doc = docs_by_id.get(doc_id)
+            if not doc:
+                continue
+
+            if doc.filename:
+                source.setdefault("filename", doc.filename)
+            source["content_type"] = doc.content_type
+            source["size_bytes"] = doc.size_bytes
+            source["download_url"] = f"/api/v1/documents/{doc.id}/download"
 
     return ChatResponse(**result)
